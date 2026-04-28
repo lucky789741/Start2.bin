@@ -621,7 +621,7 @@ if ($args.Count -ne 1) {
     exit 1
 }
 $plain = Decrypt-Start2Bin -Path $args[0]
-[Console]::OpenStandardOutput().Write($plain, 0, $plain.Length)
+[System.Text.Encoding]::UTF8.GetString($plain)
 ```
 
 The script assumes the input file is well-formed and fails fast otherwise.

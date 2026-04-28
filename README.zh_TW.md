@@ -576,7 +576,7 @@ if ($args.Count -ne 1) {
     exit 1
 }
 $plain = Decrypt-Start2Bin -Path $args[0]
-[Console]::OpenStandardOutput().Write($plain, 0, $plain.Length)
+[System.Text.Encoding]::UTF8.GetString($plain)
 ```
 
 此腳本假設輸入檔案格式正確，否則立即失敗。正式使用時，請將 `throw` 改為明確的錯誤處理，並對 `total_len`、`cipher_len`、`pre_pad` 加入防禦性檢查。
