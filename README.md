@@ -6,7 +6,7 @@
 > (Windows 11, x64) and confirmed against live files. No proprietary tooling,
 > external project, or auxiliary script is required to read this document.
 
-> 📄 繁體中文版：[start2_format_specification_zh-TW.md](./README.zh_TW.md)
+> 📄 繁體中文版：[README.zh_TW.md](./README.zh_TW.md)
 
 ---
 
