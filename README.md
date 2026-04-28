@@ -22,7 +22,7 @@
 8. [Decryption Procedure](#8-decryption-procedure)
 9. [Encryption Procedure](#9-encryption-procedure)
 10. [Worked Example](#10-worked-example)
-11. [Reference Python Implementation](#11-reference-python-implementation)
+11. [Reference PowerShell Implementation](#11-reference-powershell-implementation)
 12. [Constant Quick Reference](#12-constant-quick-reference)
 
 ---
@@ -37,21 +37,21 @@ Inside the DLL the responsible namespace is `SlimObfuscationManager`, with
 helper class `StableCryptoFunctions`. The on-disk format is:
 
 ```
-┌─────────────────────────────────┐ ← 0x00
-│  MAGIC (16 bytes)               │
-├─────────────────────────────────┤ ← 0x10
-│  HEADER_CONST (16 bytes)        │
-├─────────────────────────────────┤ ← 0x20
-│  FILETIME (8 bytes)             │
-├─────────────────────────────────┤ ← 0x28
-│  total_payload_length (4 bytes) │
-├─────────────────────────────────┤ ← 0x2C
-│  pre-padding  (N bytes)         │  ← random; N = pad_mt() & 0x1FF (0..511)
-├─────────────────────────────────┤
-│  AES-256-CBC ciphertext         │  ← total_payload_length − 0x200 bytes
-├─────────────────────────────────┤
-│  post-padding (0x200−N bytes)   │  ← random; complement of pre, NOT another 512
-└─────────────────────────────────┘
+     ┌────────────────────────────┐
+0x00 │ MAGIC (16 bytes)           │
+0x10 │ HEADER_CONST (16 bytes)    │
+0x20 │ FILETIME (8 bytes)         │
+0x28 │ total_payload_length (4 B) │
+0x2C │ pre-padding (N bytes)      │
+     ├────────────────────────────┤
+     │ AES-256-CBC ciphertext     │
+     ├────────────────────────────┤
+     │ post-padding (512−N bytes) │
+     └────────────────────────────┘
+
+     N = pad_mt() & 0x1FF (0..511)
+     ciphertext_len = total_payload_length − 0x200
+     pre + post padding always = 512 bytes
 ```
 
 The file is encrypted with **AES-256-CBC + PKCS#7 padding**. The 256-bit key
@@ -444,139 +444,188 @@ somewhere in `[64, 128]` according to the second MT output.
 
 ---
 
-## 11. Reference Python Implementation
+## 11. Reference PowerShell Implementation
 
-This complete script reads any `start2.bin` and prints its plaintext JSON.
-It depends only on the Python standard library plus the `cryptography`
-package (`pip install cryptography`).
+This complete PowerShell script reads any `start2.bin` and prints its plaintext JSON.
+It requires only PowerShell 5.1+ (built into Windows), with zero external
+dependencies.
 
-```python
-#!/usr/bin/env python3
-"""Decrypt a Windows 11 Start Menu start2.bin file."""
-
-import struct
-import sys
-from pathlib import Path
-
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
+```powershell
+#!/usr/bin/env pwsh
+<#
+.SYNOPSIS
+Decrypt a Windows 11 Start Menu start2.bin file.
+#>
+#requires -Version 5.1
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
 # --- MT19937 (matches std::mt19937 / C++11 mersenne_twister_engine<uint32_t,...>) ---
-class MT19937:
-    N, M = 624, 397
-    MATRIX_A    = 0x9908B0DF
-    UPPER_MASK  = 0x80000000
-    LOWER_MASK  = 0x7FFFFFFF
-    MASK32      = 0xFFFFFFFF
+class MT19937 {
+    [uint32[]]$State
+    [int]$Index
 
-    def __init__(self, seed):
-        s = seed & self.MASK32
-        self.mt = [s]
-        for i in range(1, self.N):
-            s = (1812433253 * (s ^ (s >> 30)) + i) & self.MASK32
-            self.mt.append(s)
-        self.index = self.N
+    MT19937([uint32]$seed) {
+        $this.State = New-Object 'uint32[]' 624
+        $this.State[0] = $seed
+        for ($i = 1; $i -lt 624; $i++) {
+            [long]$prev = $this.State[$i - 1]
+            [long]$x = $prev -bxor ($prev -shr 30)
+            $x = ($x * 0x6C078965L + $i) -band 0xFFFFFFFFL
+            $this.State[$i] = [uint32]$x
+        }
+        $this.Index = 624
+    }
 
-    def _generate(self):
-        for i in range(self.N):
-            y = (self.mt[i] & self.UPPER_MASK) | (self.mt[(i + 1) % self.N] & self.LOWER_MASK)
-            self.mt[i] = self.mt[(i + self.M) % self.N] ^ (y >> 1)
-            if y & 1:
-                self.mt[i] ^= self.MATRIX_A
-        self.index = 0
+    [void]Refresh() {
+        for ($i = 0; $i -lt 624; $i++) {
+            [long]$y = ([long]$this.State[$i] -band 0x80000000L) -bor `
+                       ([long]$this.State[($i + 1) % 624] -band 0x7FFFFFFFL)
+            [long]$val = [long]$this.State[($i + 397) % 624] -bxor ($y -shr 1)
+            if ($y -band 1L) { $val = $val -bxor 0x9908B0DFL }
+            $this.State[$i] = [uint32]($val -band 0xFFFFFFFFL)
+        }
+        $this.Index = 0
+    }
 
-    def __call__(self):
-        if self.index >= self.N:
-            self._generate()
-        y = self.mt[self.index]
-        self.index += 1
-        y ^=  y >> 11
-        y ^= (y <<  7) & 0x9D2C5680
-        y ^= (y << 15) & 0xEFC60000
-        y ^=  y >> 18
-        return y & self.MASK32
+    [uint32]Next() {
+        if ($this.Index -ge 624) { $this.Refresh() }
+        [long]$y = [long]$this.State[$this.Index]
+        $this.Index++
+        $y = ($y -bxor ($y -shr 11)) -band 0xFFFFFFFFL
+        $y = ($y -bxor (($y -shl 7)  -band 0x9D2C5680L)) -band 0xFFFFFFFFL
+        $y = ($y -bxor (($y -shl 15) -band 0xEFC60000L)) -band 0xFFFFFFFFL
+        $y = ($y -bxor ($y -shr 18)) -band 0xFFFFFFFFL
+        return [uint32]$y
+    }
 
-    def discard(self, n):
-        for _ in range(n):
-            self()
-
+    [void]Discard([int]$n) {
+        for ($i = 0; $i -lt $n; $i++) { [void]$this.Next() }
+    }
+}
 
 # --- uniform_int_distribution<unsigned int> (rejection sampling) ---
-def uniform_uint(mt, range_size):
-    if range_size == 0:
-        return 0
-    if range_size == 0xFFFFFFFF:
-        return mt()
-    bound = range_size + 1
-    while True:
-        v = mt()
-        if not ((0xFFFFFFFF // bound) <= (v // bound)
-            and (0xFFFFFFFF %  bound) != range_size):
-            return v % bound
+function Get-UniformUint {
+    param([MT19937]$Mt, [uint32]$RangeSize)
 
+    if ($RangeSize -eq 0) { return [uint32]0 }
+    if ($RangeSize -eq 0xFFFFFFFFL) { return $Mt.Next() }
 
-# --- AlphaNumericKeyGenerator(seed, length) -> 8-bit ASCII bytes ---
-def alpha_numeric_key(seed, length):
-    mt = MT19937(seed)
-    while True:
-        v = mt()
-        if v // 0x3E9 <= 0x417873:
-            break
-    mt.discard(v % 0x3E9)
+    [long]$bound = [long]$RangeSize + 1L
+    while ($true) {
+        [long]$v   = [long]$Mt.Next()
+        [long]$rem = $v % $bound
+        $condA = ([long]0xFFFFFFFFL / $bound) -le ($v / $bound)
+        $condB = ([long]0xFFFFFFFFL % $bound) -ne $RangeSize
+        if (-not ($condA -and $condB)) { return [uint32]$rem }
+    }
+}
 
-    out = bytearray()
-    for _ in range(length):
-        while True:
-            v = mt()
-            if v // 0x60 <= 0x2AAAAA9:
-                break
-        out.append((v % 0x60) + 0x20)
-    return bytes(out)
+# --- AlphaNumericKeyGenerator(seed, length) -> byte[] ---
+function Get-AlphaNumericKey {
+    param([uint32]$Seed, [int]$Length)
 
+    $mt = [MT19937]::new($Seed)
+
+    # Phase 1: warm-up — discard a variable number of outputs
+    while ($true) {
+        [long]$v = [long]$mt.Next()
+        if ([long]([math]::Floor($v / 0x3E9L)) -le 0x417873L) { break }
+    }
+    $mt.Discard([int]($v % 0x3E9L))
+
+    # Phase 2: emit `Length` bytes in [0x20, 0x80)
+    $out = New-Object 'byte[]' $Length
+    for ($i = 0; $i -lt $Length; $i++) {
+        while ($true) {
+            [long]$w = [long]$mt.Next()
+            if ([long]([math]::Floor($w / 0x60L)) -le 0x2AAAAA9L) { break }
+        }
+        $out[$i] = [byte](($w % 0x60L) + 0x20L)
+    }
+    return $out
+}
 
 # --- GetSymmetricKeys(sym_seed) -> (key_buf, iv_buf) ---
-def get_symmetric_keys(sym_seed, *, mn=0x40, mx=0x80, iv_len=0x10):
-    mt        = MT19937(sym_seed)
-    key_seed  = mt()
-    key_len   = mn + uniform_uint(mt, mx - mn)
-    iv_seed   = mt()
-    return alpha_numeric_key(key_seed, key_len), alpha_numeric_key(iv_seed, iv_len)
+function Get-SymmetricKeys {
+    param([uint32]$SymSeed)
 
+    $MIN_KEY = 0x40
+    $MAX_KEY = 0x80
+    $IV_LEN  = 0x10
 
-MAGIC        = bytes.fromhex("E27AE14B01FC4D1B9C00810BDE6E5185")
-HEADER_CONST = bytes.fromhex("4E5A5F47005BB1498A5C92AF9084F95E")
+    $mt       = [MT19937]::new($SymSeed)
+    $keySeed  = $mt.Next()
+    $keyLen   = $MIN_KEY + (Get-UniformUint -Mt $mt -RangeSize ([uint32]($MAX_KEY - $MIN_KEY)))
+    $ivSeed   = $mt.Next()
 
+    $keyBytes = Get-AlphaNumericKey -Seed $keySeed -Length $keyLen
+    $ivBytes  = Get-AlphaNumericKey -Seed $ivSeed  -Length $IV_LEN
 
-def decrypt(path):
-    data = Path(path).read_bytes()
+    # WinRT uses only the first 32 bytes as the AES-256 key
+    $keyTrunc = New-Object 'byte[]' 32
+    [Array]::Copy($keyBytes, 0, $keyTrunc, 0, 32)
 
-    assert data[0x00:0x10] == MAGIC,        "bad MAGIC"
-    assert data[0x10:0x20] == HEADER_CONST, "bad HEADER_CONST"
+    return @{ Key = $keyTrunc; Iv = $ivBytes }
+}
 
-    ft_low, ft_high, total_len = struct.unpack_from("<III", data, 0x20)
-    cipher_len  = total_len - 0x200
-    pad_mt      = MT19937(0x00AF4D97 ^ ft_low)
-    pre_pad     = pad_mt() & 0x1FF
-    cipher_off  = 0x2C + pre_pad
-    ciphertext  = data[cipher_off:cipher_off + cipher_len]
+$MAGIC        = [byte[]](0xE2,0x7A,0xE1,0x4B, 0x01,0xFC, 0x4D,0x1B, 0x9C,0x00, 0x81,0x0B,0xDE,0x6E,0x51,0x85)
+$HEADER_CONST = [byte[]](0x4E,0x5A,0x5F,0x47, 0x00,0x5B, 0xB1,0x49, 0x8A,0x5C, 0x92,0xAF,0x90,0x84,0xF9,0x5E)
 
-    sym_seed    = ft_high ^ ft_low ^ 0x3B21D91E
-    key_buf, iv_buf = get_symmetric_keys(sym_seed)
+function Decrypt-Start2Bin {
+    param([string]$Path)
 
-    cipher  = Cipher(algorithms.AES(key_buf[:32]), modes.CBC(iv_buf))
-    padded  = cipher.decryptor().update(ciphertext) + cipher.decryptor().finalize()
-    pad_len = padded[-1]
-    return padded[:-pad_len]
+    $data = [System.IO.File]::ReadAllBytes($Path)
 
+    # Verify headers
+    for ($i = 0; $i -lt 16; $i++) {
+        if ($data[$i] -ne $MAGIC[$i]) { throw "bad MAGIC" }
+    }
+    for ($i = 0; $i -lt 16; $i++) {
+        if ($data[16 + $i] -ne $HEADER_CONST[$i]) { throw "bad HEADER_CONST" }
+    }
 
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("usage: decrypt_start2.py <path-to-start2.bin>")
-    sys.stdout.buffer.write(decrypt(sys.argv[1]))
+    $ftLow  = [BitConverter]::ToUInt32($data, 0x20)
+    $ftHigh = [BitConverter]::ToUInt32($data, 0x24)
+    $totLen = [BitConverter]::ToUInt32($data, 0x28)
+    $cipherLen = [int]($totLen - 0x200)
+
+    $PAD_SEED_CONST = 0x00AF4D97L
+    $padSeed = [uint32]((($PAD_SEED_CONST) -bxor [long]$ftLow) -band 0xFFFFFFFFL)
+    $padMt   = [MT19937]::new($padSeed)
+    $prePad  = [int]($padMt.Next() -band 0x1FF)
+    $cipherOff = 0x2C + $prePad
+
+    $ciphertext = New-Object 'byte[]' $cipherLen
+    [Array]::Copy($data, $cipherOff, $ciphertext, 0, $cipherLen)
+
+    $PROV_KEY_DW0 = 0x3B21D91EL
+    $symSeed = [uint32]((([long]$ftHigh) -bxor ([long]$ftLow) -bxor $PROV_KEY_DW0) -band 0xFFFFFFFFL)
+    $keys = Get-SymmetricKeys -SymSeed $symSeed
+
+    $aes = [System.Security.Cryptography.Aes]::Create()
+    try {
+        $aes.Mode    = [System.Security.Cryptography.CipherMode]::CBC
+        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $aes.Key     = $keys.Key
+        $aes.IV      = $keys.Iv
+        $decryptor = $aes.CreateDecryptor()
+        try {
+            return $decryptor.TransformFinalBlock($ciphertext, 0, $ciphertext.Length)
+        } finally { $decryptor.Dispose() }
+    } finally { $aes.Dispose() }
+}
+
+if ($args.Count -ne 1) {
+    Write-Error "usage: .\decrypt_start2.ps1 <path-to-start2.bin>"
+    exit 1
+}
+$plain = Decrypt-Start2Bin -Path $args[0]
+[Console]::OpenStandardOutput().Write($plain, 0, $plain.Length)
 ```
 
 The script assumes the input file is well-formed and fails fast otherwise.
-For production use, replace `assert` with explicit error handling and add
+For production use, replace `throw` with explicit error handling and add
 defensive checks on `total_len`, `cipher_len`, and `pre_pad`.
 
 ---

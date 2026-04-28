@@ -20,7 +20,7 @@
 8. [解密流程](#8-解密流程)
 9. [加密流程](#9-加密流程)
 10. [實際範例](#10-實際範例)
-11. [Python 參考實作](#11-python-參考實作)
+11. [PowerShell 參考實作](#11-powershell-參考實作)
 12. [常數速查表](#12-常數速查表)
 
 ---
@@ -33,21 +33,21 @@ Windows 11 開始功能表主機程序（`StartMenuExperienceHost.exe`）載入 
 DLL 內負責此工作的命名空間是 `SlimObfuscationManager`，輔助類別為 `StableCryptoFunctions`。磁碟格式如下：
 
 ```
-┌─────────────────────────────────┐ ← 0x00
-│  MAGIC（16 位元組）              │
-├─────────────────────────────────┤ ← 0x10
-│  HEADER_CONST（16 位元組）        │
-├─────────────────────────────────┤ ← 0x20
-│  FILETIME（8 位元組）             │
-├─────────────────────────────────┤ ← 0x28
-│  total_payload_length（4 位元組）│
-├─────────────────────────────────┤ ← 0x2C
-│  前置填充（N 位元組）              │  ← 隨機；N = pad_mt() & 0x1FF（0..511）
-├─────────────────────────────────┤
-│  AES-256-CBC 密文                │  ← total_payload_length − 0x200 位元組
-├─────────────────────────────────┤
-│  後置填充（0x200−N 位元組）        │  ← 隨機；為前置之補數，非另一個 512
-└─────────────────────────────────┘
+     ┌────────────────────────────┐
+0x00 │ MAGIC（16 B）             │
+0x10 │ HEADER_CONST（16 B）      │
+0x20 │ FILETIME（8 B）           │
+0x28 │ 總酬載長度（4 B）         │
+0x2C │ 前置填充（N B）           │
+     ├────────────────────────────┤
+     │ AES-256-CBC 密文           │
+     ├────────────────────────────┤
+     │ 後置填充（512−N B）        │
+     └────────────────────────────┘
+
+     N = pad_mt() & 0x1FF（0..511）
+     密文長度 = total_payload_length − 0x200
+     前置 + 後置填充合計恆為 512 B
 ```
 
 檔案以 **AES-256-CBC + PKCS#7 填充** 加密。256 位元金鑰與 128 位元 IV 由兩個獨立的 **MT19937** 偽隨機數產生器衍生，各自以檔案本身的 `FILETIME` 欄位結合兩個嵌入常數作為種子。
@@ -400,137 +400,186 @@ plaintext   = AES_256_CBC_PKCS7_Decrypt(
 
 ---
 
-## 11. Python 參考實作
+## 11. PowerShell 參考實作
 
-以下完整腳本可讀取任何 `start2.bin` 並印出明文 JSON。
-僅依賴 Python 標準函式庫與 `cryptography` 套件（`pip install cryptography`）。
+以下完整 PowerShell 腳本可讀取任何 `start2.bin` 並印出明文 JSON。
+僅需 PowerShell 5.1+（Windows 內建），無任何外部依賴。
 
-```python
-#!/usr/bin/env python3
-"""解密 Windows 11 開始功能表 start2.bin 檔案。"""
-
-import struct
-import sys
-from pathlib import Path
-
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
+```powershell
+#!/usr/bin/env pwsh
+<#
+.SYNOPSIS
+解密 Windows 11 開始功能表 start2.bin 檔案。
+#>
+#requires -Version 5.1
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
 # --- MT19937（對應 std::mt19937 / C++11 mersenne_twister_engine<uint32_t,...>）---
-class MT19937:
-    N, M = 624, 397
-    MATRIX_A    = 0x9908B0DF
-    UPPER_MASK  = 0x80000000
-    LOWER_MASK  = 0x7FFFFFFF
-    MASK32      = 0xFFFFFFFF
+class MT19937 {
+    [uint32[]]$State
+    [int]$Index
 
-    def __init__(self, seed):
-        s = seed & self.MASK32
-        self.mt = [s]
-        for i in range(1, self.N):
-            s = (1812433253 * (s ^ (s >> 30)) + i) & self.MASK32
-            self.mt.append(s)
-        self.index = self.N
+    MT19937([uint32]$seed) {
+        $this.State = New-Object 'uint32[]' 624
+        $this.State[0] = $seed
+        for ($i = 1; $i -lt 624; $i++) {
+            [long]$prev = $this.State[$i - 1]
+            [long]$x = $prev -bxor ($prev -shr 30)
+            $x = ($x * 0x6C078965L + $i) -band 0xFFFFFFFFL
+            $this.State[$i] = [uint32]$x
+        }
+        $this.Index = 624
+    }
 
-    def _generate(self):
-        for i in range(self.N):
-            y = (self.mt[i] & self.UPPER_MASK) | (self.mt[(i + 1) % self.N] & self.LOWER_MASK)
-            self.mt[i] = self.mt[(i + self.M) % self.N] ^ (y >> 1)
-            if y & 1:
-                self.mt[i] ^= self.MATRIX_A
-        self.index = 0
+    [void]Refresh() {
+        for ($i = 0; $i -lt 624; $i++) {
+            [long]$y = ([long]$this.State[$i] -band 0x80000000L) -bor `
+                       ([long]$this.State[($i + 1) % 624] -band 0x7FFFFFFFL)
+            [long]$val = [long]$this.State[($i + 397) % 624] -bxor ($y -shr 1)
+            if ($y -band 1L) { $val = $val -bxor 0x9908B0DFL }
+            $this.State[$i] = [uint32]($val -band 0xFFFFFFFFL)
+        }
+        $this.Index = 0
+    }
 
-    def __call__(self):
-        if self.index >= self.N:
-            self._generate()
-        y = self.mt[self.index]
-        self.index += 1
-        y ^=  y >> 11
-        y ^= (y <<  7) & 0x9D2C5680
-        y ^= (y << 15) & 0xEFC60000
-        y ^=  y >> 18
-        return y & self.MASK32
+    [uint32]Next() {
+        if ($this.Index -ge 624) { $this.Refresh() }
+        [long]$y = [long]$this.State[$this.Index]
+        $this.Index++
+        $y = ($y -bxor ($y -shr 11)) -band 0xFFFFFFFFL
+        $y = ($y -bxor (($y -shl 7)  -band 0x9D2C5680L)) -band 0xFFFFFFFFL
+        $y = ($y -bxor (($y -shl 15) -band 0xEFC60000L)) -band 0xFFFFFFFFL
+        $y = ($y -bxor ($y -shr 18)) -band 0xFFFFFFFFL
+        return [uint32]$y
+    }
 
-    def discard(self, n):
-        for _ in range(n):
-            self()
-
+    [void]Discard([int]$n) {
+        for ($i = 0; $i -lt $n; $i++) { [void]$this.Next() }
+    }
+}
 
 # --- uniform_int_distribution<unsigned int>（拒絕取樣）---
-def uniform_uint(mt, range_size):
-    if range_size == 0:
-        return 0
-    if range_size == 0xFFFFFFFF:
-        return mt()
-    bound = range_size + 1
-    while True:
-        v = mt()
-        if not ((0xFFFFFFFF // bound) <= (v // bound)
-            and (0xFFFFFFFF %  bound) != range_size):
-            return v % bound
+function Get-UniformUint {
+    param([MT19937]$Mt, [uint32]$RangeSize)
 
+    if ($RangeSize -eq 0) { return [uint32]0 }
+    if ($RangeSize -eq 0xFFFFFFFFL) { return $Mt.Next() }
 
-# --- AlphaNumericKeyGenerator(seed, length) -> 8 位元 ASCII 位元組 ---
-def alpha_numeric_key(seed, length):
-    mt = MT19937(seed)
-    while True:
-        v = mt()
-        if v // 0x3E9 <= 0x417873:
-            break
-    mt.discard(v % 0x3E9)
+    [long]$bound = [long]$RangeSize + 1L
+    while ($true) {
+        [long]$v   = [long]$Mt.Next()
+        [long]$rem = $v % $bound
+        $condA = ([long]0xFFFFFFFFL / $bound) -le ($v / $bound)
+        $condB = ([long]0xFFFFFFFFL % $bound) -ne $RangeSize
+        if (-not ($condA -and $condB)) { return [uint32]$rem }
+    }
+}
 
-    out = bytearray()
-    for _ in range(length):
-        while True:
-            v = mt()
-            if v // 0x60 <= 0x2AAAAA9:
-                break
-        out.append((v % 0x60) + 0x20)
-    return bytes(out)
+# --- AlphaNumericKeyGenerator(seed, length) -> byte[] ---
+function Get-AlphaNumericKey {
+    param([uint32]$Seed, [int]$Length)
 
+    $mt = [MT19937]::new($Seed)
+
+    # 第一階段：暖機 — 丟棄不定數量的輸出
+    while ($true) {
+        [long]$v = [long]$mt.Next()
+        if ([long]([math]::Floor($v / 0x3E9L)) -le 0x417873L) { break }
+    }
+    $mt.Discard([int]($v % 0x3E9L))
+
+    # 第二階段：產生 length 個位元組，範圍 [0x20, 0x80)
+    $out = New-Object 'byte[]' $Length
+    for ($i = 0; $i -lt $Length; $i++) {
+        while ($true) {
+            [long]$w = [long]$mt.Next()
+            if ([long]([math]::Floor($w / 0x60L)) -le 0x2AAAAA9L) { break }
+        }
+        $out[$i] = [byte](($w % 0x60L) + 0x20L)
+    }
+    return $out
+}
 
 # --- GetSymmetricKeys(sym_seed) -> (key_buf, iv_buf) ---
-def get_symmetric_keys(sym_seed, *, mn=0x40, mx=0x80, iv_len=0x10):
-    mt        = MT19937(sym_seed)
-    key_seed  = mt()
-    key_len   = mn + uniform_uint(mt, mx - mn)
-    iv_seed   = mt()
-    return alpha_numeric_key(key_seed, key_len), alpha_numeric_key(iv_seed, iv_len)
+function Get-SymmetricKeys {
+    param([uint32]$SymSeed)
 
+    $MIN_KEY = 0x40
+    $MAX_KEY = 0x80
+    $IV_LEN  = 0x10
 
-MAGIC        = bytes.fromhex("E27AE14B01FC4D1B9C00810BDE6E5185")
-HEADER_CONST = bytes.fromhex("4E5A5F47005BB1498A5C92AF9084F95E")
+    $mt       = [MT19937]::new($SymSeed)
+    $keySeed  = $mt.Next()
+    $keyLen   = $MIN_KEY + (Get-UniformUint -Mt $mt -RangeSize ([uint32]($MAX_KEY - $MIN_KEY)))
+    $ivSeed   = $mt.Next()
 
+    $keyBytes = Get-AlphaNumericKey -Seed $keySeed -Length $keyLen
+    $ivBytes  = Get-AlphaNumericKey -Seed $ivSeed  -Length $IV_LEN
 
-def decrypt(path):
-    data = Path(path).read_bytes()
+    # WinRT 僅使用前 32 位元組作為 AES-256 金鑰
+    $keyTrunc = New-Object 'byte[]' 32
+    [Array]::Copy($keyBytes, 0, $keyTrunc, 0, 32)
 
-    assert data[0x00:0x10] == MAGIC,        "MAGIC 不符"
-    assert data[0x10:0x20] == HEADER_CONST, "HEADER_CONST 不符"
+    return @{ Key = $keyTrunc; Iv = $ivBytes }
+}
 
-    ft_low, ft_high, total_len = struct.unpack_from("<III", data, 0x20)
-    cipher_len  = total_len - 0x200
-    pad_mt      = MT19937(0x00AF4D97 ^ ft_low)
-    pre_pad     = pad_mt() & 0x1FF
-    cipher_off  = 0x2C + pre_pad
-    ciphertext  = data[cipher_off:cipher_off + cipher_len]
+$MAGIC        = [byte[]](0xE2,0x7A,0xE1,0x4B, 0x01,0xFC, 0x4D,0x1B, 0x9C,0x00, 0x81,0x0B,0xDE,0x6E,0x51,0x85)
+$HEADER_CONST = [byte[]](0x4E,0x5A,0x5F,0x47, 0x00,0x5B, 0xB1,0x49, 0x8A,0x5C, 0x92,0xAF,0x90,0x84,0xF9,0x5E)
 
-    sym_seed    = ft_high ^ ft_low ^ 0x3B21D91E
-    key_buf, iv_buf = get_symmetric_keys(sym_seed)
+function Decrypt-Start2Bin {
+    param([string]$Path)
 
-    cipher  = Cipher(algorithms.AES(key_buf[:32]), modes.CBC(iv_buf))
-    padded  = cipher.decryptor().update(ciphertext) + cipher.decryptor().finalize()
-    pad_len = padded[-1]
-    return padded[:-pad_len]
+    $data = [System.IO.File]::ReadAllBytes($Path)
 
+    # 驗證標頭
+    for ($i = 0; $i -lt 16; $i++) {
+        if ($data[$i] -ne $MAGIC[$i]) { throw "MAGIC 不符" }
+    }
+    for ($i = 0; $i -lt 16; $i++) {
+        if ($data[16 + $i] -ne $HEADER_CONST[$i]) { throw "HEADER_CONST 不符" }
+    }
 
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("用法：decrypt_start2.py <start2.bin 路徑>")
-    sys.stdout.buffer.write(decrypt(sys.argv[1]))
+    $ftLow  = [BitConverter]::ToUInt32($data, 0x20)
+    $ftHigh = [BitConverter]::ToUInt32($data, 0x24)
+    $totLen = [BitConverter]::ToUInt32($data, 0x28)
+    $cipherLen = [int]($totLen - 0x200)
+
+    $PAD_SEED_CONST = 0x00AF4D97L
+    $padSeed = [uint32]((($PAD_SEED_CONST) -bxor [long]$ftLow) -band 0xFFFFFFFFL)
+    $padMt   = [MT19937]::new($padSeed)
+    $prePad  = [int]($padMt.Next() -band 0x1FF)
+    $cipherOff = 0x2C + $prePad
+
+    $ciphertext = New-Object 'byte[]' $cipherLen
+    [Array]::Copy($data, $cipherOff, $ciphertext, 0, $cipherLen)
+
+    $PROV_KEY_DW0 = 0x3B21D91EL
+    $symSeed = [uint32]((([long]$ftHigh) -bxor ([long]$ftLow) -bxor $PROV_KEY_DW0) -band 0xFFFFFFFFL)
+    $keys = Get-SymmetricKeys -SymSeed $symSeed
+
+    $aes = [System.Security.Cryptography.Aes]::Create()
+    try {
+        $aes.Mode    = [System.Security.Cryptography.CipherMode]::CBC
+        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $aes.Key     = $keys.Key
+        $aes.IV      = $keys.Iv
+        $decryptor = $aes.CreateDecryptor()
+        try {
+            return $decryptor.TransformFinalBlock($ciphertext, 0, $ciphertext.Length)
+        } finally { $decryptor.Dispose() }
+    } finally { $aes.Dispose() }
+}
+
+if ($args.Count -ne 1) {
+    Write-Error "用法：.\decrypt_start2.ps1 <start2.bin 路徑>"
+    exit 1
+}
+$plain = Decrypt-Start2Bin -Path $args[0]
+[Console]::OpenStandardOutput().Write($plain, 0, $plain.Length)
 ```
 
-此腳本假設輸入檔案格式正確，否則立即失敗。正式使用時，請將 `assert` 改為明確的錯誤處理，並對 `total_len`、`cipher_len`、`pre_pad` 加入防禦性檢查。
+此腳本假設輸入檔案格式正確，否則立即失敗。正式使用時，請將 `throw` 改為明確的錯誤處理，並對 `total_len`、`cipher_len`、`pre_pad` 加入防禦性檢查。
 
 ---
 
