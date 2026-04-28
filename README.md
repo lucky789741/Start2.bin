@@ -71,7 +71,7 @@ properly described as **obfuscation**, not authenticated encryption.
     start2.bin
 ```
 
-Both files are written atomically by the Start Menu host whenever the user
+The files are written atomically by the Start Menu host whenever the user
 pins, unpins, or rearranges tiles.
 
 ---
