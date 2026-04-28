@@ -4,7 +4,7 @@
 > 所有數值均由靜態分析 `StartMenu.dll` v2126.5401.10.0（Windows 11, x64）取得，並經由實際檔案比對確認。
 > 閱讀本文件不需要任何專屬工具、外部專案或輔助腳本。
 
-> 📄 English version: [start2_format_specification.md](./README.md)
+> 📄 English version: [README.md](./README.md)
 
 ---
 
