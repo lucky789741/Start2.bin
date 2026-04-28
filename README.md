@@ -68,8 +68,7 @@ properly described as **obfuscation**, not authenticated encryption.
 
 ```
 %LocalAppData%\Packages\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\LocalState\
-    start2.bin       — current state
-    start2.bin.bak   — previous version (identical format)
+    start2.bin
 ```
 
 Both files are written atomically by the Start Menu host whenever the user
