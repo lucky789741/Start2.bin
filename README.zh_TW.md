@@ -77,9 +77,9 @@ DLL 內負責此工作的命名空間是 `SlimObfuscationManager`，輔助類別
 | `0x10`   | 16 B        | `HEADER_CONST`            | 固定 16 位元組常數，逐字寫入                             |
 | `0x20`   | 4 B         | `FILETIME.dwLowDateTime`  | `GetSystemTimeAsFileTime()` 的低 32 位元                 |
 | `0x24`   | 4 B         | `FILETIME.dwHighDateTime` | `GetSystemTimeAsFileTime()` 的高 32 位元                 |
-| `0x28`   | 4 B         | `total_payload_length`    | `ciphertext_len + 0x200`                                 |
+| `0x28`   | 4 B         | `總酬載長度`    | `ciphertext_len + 0x200`                                 |
 | `0x2C`   | `N` B       | 前置填充                  | 隨機位元組，`N = pad_mt() & 0x1FF`（0..511）             |
-| `0x2C+N` | `M` B       | 密文                      | `M = total_payload_length − 0x200`                       |
+| `0x2C+N` | `M` B       | 密文                      | `M = 總酬載長度 − 0x200`                       |
 | `0x2C+N+M` | `0x200−N` B | 後置填充              | 隨機位元組，前置 + 後置合計恆為 512                      |
 
 ### 3.1 `MAGIC` 位元組表示方式
